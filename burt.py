@@ -22,7 +22,7 @@ MEMORY_DIR = Path("memory")
 MEMORY_DIR.mkdir(exist_ok=True)
 
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+openai_client = openai.OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 START_TIME = time.time()
 message_count = 0
@@ -154,6 +154,9 @@ async def ask_command(interaction: discord.Interaction, question: str, private: 
 @bot.tree.command(name="imagine", description="Generate an image")
 @app_commands.describe(prompt="Describe the image you want")
 async def imagine_command(interaction: discord.Interaction, prompt: str):
+    if not openai_client:
+        await interaction.response.send_message("Image generation is not configured (no OPENAI_API_KEY set).", ephemeral=True)
+        return
     await interaction.response.defer()
     try:
         result = openai_client.images.generate(
