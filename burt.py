@@ -256,12 +256,8 @@ class BurtBot(commands.Bot):
         global message_count
         if message.author.bot:
             return
-        is_dm = isinstance(message.channel, discord.DMChannel)
         is_mention = self.user in message.mentions
         is_name_trigger = re.search(r"burt", message.content, re.IGNORECASE) is not None
-        if not (is_dm or is_mention or is_name_trigger):
-            await self.process_commands(message)
-            return
         message_count += 1
         content = message.content
         if is_mention:
