@@ -15,8 +15,12 @@ from discord.ext import commands
 import anthropic
 import openai
 from dotenv import load_dotenv
+import collections
 
 load_dotenv()
+
+_last_response: dict[int, float] = collections.defaultdict(float)
+CHANNEL_COOLDOWN = 8  # seconds
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
@@ -261,6 +265,10 @@ class BurtBot(commands.Bot):
         if not is_dm and getattr(message.channel, 'name', None) != 'general':
             await self.process_commands(message)
             return
+        now = time.time()
+        if now - _last_response[message.channel.id] < CHANNEL_COOLDOWN:
+            await self.process_commands(message)
+            return
         is_mention = self.user in message.mentions
         is_name_trigger = re.search(r"burt", message.content, re.IGNORECASE) is not None
         message_count += 1
@@ -271,6 +279,9 @@ class BurtBot(commands.Bot):
             content = re.sub(r"burt", "", content, flags=re.IGNORECASE).strip()
         if not content:
             content = "..."
+        if len(content.strip()) < 3 or content.strip() in ("...", "…", ".", "..", "?", "!"):
+            await self.process_commands(message)
+            return
         image_urls = []
         video_frames = []
         for att in message.attachments:
@@ -322,6 +333,7 @@ class BurtBot(commands.Bot):
                 sent_anything = True
         if not sent_anything:
             await message.reply(reply or "...", mention_author=False)
+        _last_response[message.channel.id] = time.time()
         await self.process_commands(message)
 
 
