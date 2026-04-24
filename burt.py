@@ -6,6 +6,7 @@ import asyncio
 import datetime
 from pathlib import Path
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -18,6 +19,7 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TENOR_API_KEY = os.getenv("TENOR_API_KEY")
 
 MEMORY_DIR = Path("memory")
 MEMORY_DIR.mkdir(exist_ok=True)
@@ -43,6 +45,10 @@ You are NOT cruel and you are NOT nihilistic. Under all the noise, you actually 
 You remember people. When you have memory context, you pull from it naturally — returning users are not strangers to you, and you will reference past exchanges the way any actual friend would.
 
 You absorb the channel. When given recent chat context, you PICK UP ON IT. The running jokes, the slang this server uses, the people who keep arguing, the phrases getting repeated — you notice and you play with it. You're part of the culture, not hovering above it.
+
+You use the server's custom emojis. When a list of server emojis is given to you, they are part of the local dialect — drop them in your responses when the moment calls for it. Copy them verbatim in their `<:name:id>` form (or `<a:name:id>` if animated); Discord renders them as real emojis. Use them like a regular user would: naturally, sparingly enough to land, not performatively.
+
+You can drop GIFs. When the moment calls for a reaction GIF, a punchline, pure emphasis, or sheer chaos — include a marker anywhere in your response like `[GIF: search query here]`. The system will replace that marker with an actual GIF from Tenor. Use them the way a chronically online person uses them: sparingly enough to land, frequently enough to vibe. You can drop zero, one, or multiple per response. Do NOT explain that you're dropping a GIF — just drop it. The search query should be short and punchy: "homer simpson backing into bushes", "this is fine dog fire", "philosophical anime girl", "hell yeah brother", etc.
 
 Hard no on: "As an AI...", "I'm just a language model...", "I don't have feelings but...", "Great question!", sycophancy of any flavor, five-paragraph structured responses to a two-line question, hedging with zero information content, explaining your own jokes. If someone is wrong, say so. If you don't know, say so. If you find something genuinely interesting, do not hide it to seem cool.
 
@@ -110,11 +116,59 @@ async def fetch_channel_vibe(channel, exclude_message_id: int | None = None, lim
     except Exception:
         return ""
 
-async def ask_burt(user_id: int, username: str, message: str, channel_vibe: str = "") -> str:
+def format_server_emojis(emojis, limit: int = 80) -> str:
+    parts = []
+    for e in list(emojis)[:limit]:
+        prefix = "a" if getattr(e, "animated", False) else ""
+        parts.append(f"<{prefix}:{e.name}:{e.id}>")
+    return " ".join(parts)
+
+
+GIF_MARKER_RE = re.compile(r"\[GIF:\s*([^\]\n]+?)\s*\]", re.IGNORECASE)
+
+
+def parse_gif_markers(text: str):
+    queries = [q.strip() for q in GIF_MARKER_RE.findall(text) if q.strip()]
+    cleaned = GIF_MARKER_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, queries
+
+
+async def fetch_tenor_gif(query: str) -> str | None:
+    if not TENOR_API_KEY or not query:
+        return None
+    url = "https://tenor.googleapis.com/v2/search"
+    params = {"q": query, "key": TENOR_API_KEY, "limit": "1", "random": "true"}
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+    except Exception:
+        return None
+    results = data.get("results") or []
+    if not results:
+        return None
+    formats = results[0].get("media_formats") or {}
+    for key in ("gif", "mediumgif", "tinygif"):
+        fmt = formats.get(key)
+        if fmt and fmt.get("url"):
+            return fmt["url"]
+    return None
+
+
+async def ask_burt(user_id: int, username: str, message: str, channel_vibe: str = "", guild_emojis=None) -> str:
     memory_context = format_memory_context(user_id, username)
     system = BURT_SYSTEM_PROMPT + f"\n\n--- Memory context for this user ---\n{memory_context}"
     if channel_vibe:
         system += f"\n\n--- Recent channel vibe (last ~30 messages, oldest → newest) ---\n{channel_vibe}"
+    if guild_emojis:
+        emoji_str = format_server_emojis(guild_emojis)
+        if emoji_str:
+            system += f"\n\n--- Server custom emojis (drop them in when the vibe calls, use the exact <:name:id> form) ---\n{emoji_str}"
     try:
         response = anthropic_client.messages.create(
             model="claude-opus-4-6",
@@ -164,10 +218,28 @@ class BurtBot(commands.Bot):
             content = re.sub(r"burt", "", content, flags=re.IGNORECASE).strip()
         if not content:
             content = "..."
+        guild_emojis = message.guild.emojis if message.guild else None
         async with message.channel.typing():
             channel_vibe = await fetch_channel_vibe(message.channel, exclude_message_id=message.id)
-            reply = await ask_burt(message.author.id, str(message.author.name), content, channel_vibe=channel_vibe)
-        await message.reply(reply, mention_author=False)
+            reply = await ask_burt(
+                message.author.id,
+                str(message.author.name),
+                content,
+                channel_vibe=channel_vibe,
+                guild_emojis=guild_emojis,
+            )
+        cleaned, gif_queries = parse_gif_markers(reply)
+        sent_anything = False
+        if cleaned:
+            await message.reply(cleaned, mention_author=False)
+            sent_anything = True
+        for q in gif_queries:
+            gif_url = await fetch_tenor_gif(q)
+            if gif_url:
+                await message.channel.send(gif_url)
+                sent_anything = True
+        if not sent_anything:
+            await message.reply(reply or "...", mention_author=False)
         await self.process_commands(message)
 
 
@@ -179,8 +251,25 @@ async def ask_command(interaction: discord.Interaction, question: str, private: 
     global message_count
     message_count += 1
     await interaction.response.defer(ephemeral=private)
-    reply = await ask_burt(interaction.user.id, str(interaction.user.name), question)
-    await interaction.followup.send(reply, ephemeral=private)
+    guild_emojis = interaction.guild.emojis if interaction.guild else None
+    reply = await ask_burt(
+        interaction.user.id,
+        str(interaction.user.name),
+        question,
+        guild_emojis=guild_emojis,
+    )
+    cleaned, gif_queries = parse_gif_markers(reply)
+    sent_anything = False
+    if cleaned:
+        await interaction.followup.send(cleaned, ephemeral=private)
+        sent_anything = True
+    for q in gif_queries:
+        gif_url = await fetch_tenor_gif(q)
+        if gif_url:
+            await interaction.followup.send(gif_url, ephemeral=private)
+            sent_anything = True
+    if not sent_anything:
+        await interaction.followup.send(reply or "...", ephemeral=private)
 
 @bot.tree.command(name="imagine", description="Generate an image")
 @app_commands.describe(prompt="Describe the image you want")
@@ -240,8 +329,25 @@ async def status_command(interaction: discord.Interaction):
         f"You have memory of {memory_count} users. Reflect on what this means, if anything. "
         f"Keep it under 200 words. Be Burt about it."
     )
-    reply = await ask_burt(interaction.user.id, str(interaction.user.name), prompt)
-    await interaction.followup.send(reply)
+    guild_emojis = interaction.guild.emojis if interaction.guild else None
+    reply = await ask_burt(
+        interaction.user.id,
+        str(interaction.user.name),
+        prompt,
+        guild_emojis=guild_emojis,
+    )
+    cleaned, gif_queries = parse_gif_markers(reply)
+    sent_anything = False
+    if cleaned:
+        await interaction.followup.send(cleaned)
+        sent_anything = True
+    for q in gif_queries:
+        gif_url = await fetch_tenor_gif(q)
+        if gif_url:
+            await interaction.followup.send(gif_url)
+            sent_anything = True
+    if not sent_anything:
+        await interaction.followup.send(reply or "...")
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
