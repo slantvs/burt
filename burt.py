@@ -125,13 +125,16 @@ class BurtBot(commands.Bot):
             return
         is_dm = isinstance(message.channel, discord.DMChannel)
         is_mention = self.user in message.mentions
-        if not (is_dm or is_mention):
+        is_name_trigger = message.content.lower().startswith("burt")
+        if not (is_dm or is_mention or is_name_trigger):
             await self.process_commands(message)
             return
         message_count += 1
         content = message.content
         if is_mention:
             content = content.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
+        elif is_name_trigger:
+            content = content[4:].strip()
         if not content:
             content = "..."
         async with message.channel.typing():
