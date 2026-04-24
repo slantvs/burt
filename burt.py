@@ -281,6 +281,19 @@ class BurtBot(commands.Bot):
             elif ct.startswith("image/"):
                 image_urls.append(att.url)
         guild_emojis = message.guild.emojis if message.guild else None
+        reply_context = ""
+        if message.reference and message.reference.message_id:
+            try:
+                ref_msg = message.reference.cached_message
+                if ref_msg is None:
+                    ref_msg = await message.channel.fetch_message(message.reference.message_id)
+                if ref_msg:
+                    ref_author = getattr(ref_msg.author, "display_name", None) or ref_msg.author.name
+                    reply_context = f"[Replying to {ref_author}: \"{ref_msg.content[:300]}\"] "
+            except Exception:
+                pass
+        if reply_context:
+            content = reply_context + content
         async with message.channel.typing():
             channel_vibe = await fetch_channel_vibe(message.channel, exclude_message_id=message.id)
             reply = await ask_burt(
