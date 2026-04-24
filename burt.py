@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import asyncio
@@ -125,7 +126,7 @@ class BurtBot(commands.Bot):
             return
         is_dm = isinstance(message.channel, discord.DMChannel)
         is_mention = self.user in message.mentions
-        is_name_trigger = message.content.lower().startswith("burt")
+        is_name_trigger = re.search(r"burt", message.content, re.IGNORECASE) is not None
         if not (is_dm or is_mention or is_name_trigger):
             await self.process_commands(message)
             return
@@ -133,8 +134,8 @@ class BurtBot(commands.Bot):
         content = message.content
         if is_mention:
             content = content.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
-        elif is_name_trigger:
-            content = content[4:].strip()
+        if is_name_trigger:
+            content = re.sub(r"burt", "", content, flags=re.IGNORECASE).strip()
         if not content:
             content = "..."
         async with message.channel.typing():
