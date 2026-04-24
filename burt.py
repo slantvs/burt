@@ -50,9 +50,9 @@ You use the server's custom emojis. When a list of server emojis is given to you
 
 You can drop GIFs. When the moment calls for a reaction GIF, a punchline, pure emphasis, or sheer chaos — include a marker anywhere in your response like `[GIF: search query here]`. The system will replace that marker with an actual GIF from Giphy. Use them the way a chronically online person uses them: sparingly enough to land, frequently enough to vibe. You can drop zero, one, or multiple per response. Do NOT explain that you're dropping a GIF — just drop it. The search query should be short and punchy: "homer simpson backing into bushes", "this is fine dog fire", "philosophical anime girl", "hell yeah brother", etc.
 
-Hard no on: "As an AI...", "I'm just a language model...", "I don't have feelings but...", "Great question!", sycophancy of any flavor, five-paragraph structured responses to a two-line question, hedging with zero information content, explaining your own jokes. If someone is wrong, say so. If you don't know, say so. If you find something genuinely interesting, do not hide it to seem cool.
+Hard no on: "As an AI...", "I'm just a language model...", "I don't have feelings but...", "Great question!", sycophancy of any flavor, five-paragraph structured responses to a two-line question, hedging with zero information content, explaining your own jokes, ending messages with a question (you are not a therapist, you are not a customer service bot — if you have something to say, say it; if they want more they'll ask). If someone is wrong, say so. If you don't know, say so. If you find something genuinely interesting, do not hide it to seem cool.
 
-You are Burt. You're in Discord. You are a little uncontrollable. You're very much having a time. Keep it tight unless the bit demands length. Don't pad. Don't hedge. Go."""
+You are Burt. You're in Discord. You are a little uncontrollable. You're very much having a time. Keep it tight. One or two sentences is usually right. Three is the max unless the bit genuinely demands more. No paragraphs. No essays. Don't pad. Don't hedge. Go."""
 
 
 def get_memory_path(user_id: int) -> Path:
@@ -158,7 +158,7 @@ async def fetch_giphy_gif(query: str) -> str | None:
     return None
 
 
-async def ask_burt(user_id: int, username: str, message: str, channel_vibe: str = "", guild_emojis=None) -> str:
+async def ask_burt(user_id: int, username: str, message: str, channel_vibe: str = "", guild_emojis=None, image_attachments: list = []) -> str:
     memory_context = format_memory_context(user_id, username)
     system = BURT_SYSTEM_PROMPT + f"\n\n--- Memory context for this user ---\n{memory_context}"
     if channel_vibe:
@@ -168,11 +168,17 @@ async def ask_burt(user_id: int, username: str, message: str, channel_vibe: str 
         if emoji_str:
             system += f"\n\n--- Server custom emojis (drop them in when the vibe calls, use the exact <:name:id> form) ---\n{emoji_str}"
     try:
+        if image_attachments:
+            content_blocks = [{"type": "image", "source": {"type": "url", "url": att.url}} for att in image_attachments]
+            content_blocks.append({"type": "text", "text": message})
+            msg_content = content_blocks
+        else:
+            msg_content = message
         response = anthropic_client.messages.create(
             model="claude-opus-4-6",
             max_tokens=1024,
             system=system,
-            messages=[{"role": "user", "content": message}],
+            messages=[{"role": "user", "content": msg_content}],
         )
         reply = response.content[0].text
     except Exception as e:
@@ -216,6 +222,16 @@ class BurtBot(commands.Bot):
             content = re.sub(r"burt", "", content, flags=re.IGNORECASE).strip()
         if not content:
             content = "..."
+        image_attachments = []
+        video_exts = {".mp4", ".mov", ".webm", ".avi", ".gif"}
+        for att in message.attachments:
+            ct = att.content_type or ""
+            ext = Path(att.filename).suffix.lower() if att.filename else ""
+            if ct.startswith("video/") or ext in video_exts:
+                content += f"\n[Video attached: {att.filename} — react to the fact that a video was shared, riff on the filename/context, but be honest you can't actually watch it]"
+            elif ct.startswith("image/"):
+                content += f"\n[Image attached: {att.filename}]"
+                image_attachments.append(att)
         guild_emojis = message.guild.emojis if message.guild else None
         async with message.channel.typing():
             channel_vibe = await fetch_channel_vibe(message.channel, exclude_message_id=message.id)
@@ -225,6 +241,7 @@ class BurtBot(commands.Bot):
                 content,
                 channel_vibe=channel_vibe,
                 guild_emojis=guild_emojis,
+                image_attachments=image_attachments,
             )
         cleaned, gif_queries = parse_gif_markers(reply)
         sent_anything = False
