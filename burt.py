@@ -4,6 +4,8 @@ import json
 import time
 import asyncio
 import datetime
+import tempfile
+import base64
 from pathlib import Path
 
 import aiohttp
@@ -158,7 +160,49 @@ async def fetch_giphy_gif(query: str) -> str | None:
     return None
 
 
-async def ask_burt(user_id: int, username: str, message: str, channel_vibe: str = "", guild_emojis=None, image_urls: list[str] = []) -> str:
+async def extract_video_frames(video_url: str, num_frames: int = 4) -> list[str]:
+    """Download video and extract frames as base64 JPEG strings."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(video_url) as resp:
+                if resp.status != 200:
+                    return []
+                video_data = await resp.read()
+    except Exception:
+        return []
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video_path = os.path.join(tmpdir, "video.mp4")
+        with open(video_path, "wb") as f:
+            f.write(video_data)
+
+        frame_pattern = os.path.join(tmpdir, "frame%02d.jpg")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-i", video_path,
+                "-vf", f"select='not(mod(n,max(1\\,trunc(n_frames/{num_frames}))))',scale=512:-1",
+                "-vframes", str(num_frames),
+                "-q:v", "3",
+                frame_pattern,
+                "-y", "-loglevel", "error",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=20)
+        except Exception:
+            return []
+
+        frames = []
+        for i in range(1, num_frames + 1):
+            frame_path = os.path.join(tmpdir, f"frame{i:02d}.jpg")
+            if os.path.exists(frame_path):
+                with open(frame_path, "rb") as f:
+                    frames.append(base64.b64encode(f.read()).decode())
+        return frames
+
+
+async def ask_burt(user_id: int, username: str, message: str, channel_vibe: str = "", guild_emojis=None, image_urls: list[str] = [], video_frames: list[str] = []) -> str:
     memory_context = format_memory_context(user_id, username)
     system = BURT_SYSTEM_PROMPT + f"\n\n--- Memory context for this user ---\n{memory_context}"
     if channel_vibe:
@@ -168,8 +212,10 @@ async def ask_burt(user_id: int, username: str, message: str, channel_vibe: str 
         if emoji_str:
             system += f"\n\n--- Server custom emojis (drop them in when the vibe calls, use the exact <:name:id> form) ---\n{emoji_str}"
     try:
-        if image_urls:
+        if image_urls or video_frames:
             user_content = []
+            for frame_b64 in video_frames:
+                user_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": frame_b64}})
             for url in image_urls:
                 user_content.append({"type": "image", "source": {"type": "url", "url": url}})
             user_content.append({"type": "text", "text": message})
@@ -225,11 +271,17 @@ class BurtBot(commands.Bot):
         if not content:
             content = "..."
         image_urls = []
+        video_frames = []
         for att in message.attachments:
             ct = att.content_type or ""
             fname = att.filename or ""
             if ct.startswith("video/") or fname.lower().endswith((".mp4", ".mov", ".webm", ".avi")):
-                content += f"\n[Video attached: {fname} — you can't watch it but react to the fact a video was dropped, riff on the filename/vibe]"
+                frames = await extract_video_frames(att.url)
+                if frames:
+                    video_frames.extend(frames)
+                    content += "\n[You are watching a video — these are frames extracted from it. Describe what you see and react to it as Burt would.]"
+                else:
+                    content += f"\n[Video attached: {fname} — you can't watch it but react to the fact a video was dropped, riff on the filename/vibe]"
             elif ct.startswith("image/"):
                 image_urls.append(att.url)
         guild_emojis = message.guild.emojis if message.guild else None
@@ -242,6 +294,7 @@ class BurtBot(commands.Bot):
                 channel_vibe=channel_vibe,
                 guild_emojis=guild_emojis,
                 image_urls=image_urls,
+                video_frames=video_frames,
             )
         cleaned, gif_queries = parse_gif_markers(reply)
         sent_anything = False
