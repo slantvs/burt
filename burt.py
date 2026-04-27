@@ -274,9 +274,6 @@ class BurtBot(commands.Bot):
             content = re.sub(r"burt", "", content, flags=re.IGNORECASE).strip()
         if not content:
             content = "..."
-        if len(content.strip()) < 3 or content.strip() in ("...", "…", ".", "..", "?", "!"):
-            await self.process_commands(message)
-            return
         image_urls = []
         video_frames = []
         for att in message.attachments:
