@@ -271,6 +271,9 @@ class BurtBot(commands.Bot):
             return
         is_mention = self.user in message.mentions
         is_name_trigger = re.search(r"burt", message.content, re.IGNORECASE) is not None
+        if not is_mention and not is_name_trigger:
+            await self.process_commands(message)
+            return
         message_count += 1
         content = message.content
         if is_mention:
